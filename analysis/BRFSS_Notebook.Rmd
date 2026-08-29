@@ -6,7 +6,7 @@ output: html_notebook
 
 ### Setup from setup.R/renv.lock
 ```{r}
-source(here("setup.R"))
+source(here::here("setup.R"))
 ```
 
 ### Download BRFSS
@@ -22,7 +22,7 @@ ingest_brfss_to_duckdb(2024)
 ```{r}
 con <- DBI::dbConnect(
   duckdb::duckdb(shared_home = FALSE),
-  dbdir = "data/brfss.duckdb",
+  dbdir = here::here("data", "brfss.duckdb"),
   read_only = TRUE
 )
 
