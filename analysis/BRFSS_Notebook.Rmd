@@ -1,0 +1,117 @@
+---
+title: "BRFSS Analysis - Akash Desai"
+output: html_notebook
+---
+
+
+### Setup from setup.R/renv.lock
+```{r}
+source("setup.R")
+```
+
+### Download BRFSS
+```{r}
+download_brfss(2024)
+```
+
+### Read BRFSS
+```{r}
+ingest_brfss_to_duckdb(2024)
+```
+### Establish Connection to duckDB
+```{r}
+con <- DBI::dbConnect(
+  duckdb::duckdb(shared_home = FALSE),
+  dbdir = "data/brfss.duckdb",
+  read_only = TRUE
+)
+
+DBI::dbListTables(con)
+```
+
+### Exploratory
+```{r}
+# Dimensions
+DBI::dbGetQuery(
+  con,
+  "
+  SELECT
+    COUNT(*) AS n_rows
+  FROM brfss_2024
+  "
+)
+
+ncol(DBI::dbListFields(con, "brfss_2024"))
+
+# Preview
+DBI::dbGetQuery(
+  con,
+  "SELECT * FROM brfss_2024 LIMIT 5"
+)
+```
+
+```{r}
+brfss <- DBI::dbGetQuery(
+  con,
+  "
+  SELECT
+    -- -----------------------
+    -- Survey / time
+    -- -----------------------
+    SEQNO,
+    _STATE,
+    FMONTH,
+    IDATE,
+    IMONTH,
+    IDAY,
+    IYEAR,
+
+    -- -----------------------
+    -- Demographics
+    -- -----------------------
+    SEXVAR,
+    _AGEG5YR,
+    _AGE65YR,
+    _AGE80,
+    _RACE,
+    _RACEGR3,
+    INCOME3,
+
+    -- -----------------------
+    -- Healthcare access
+    -- -----------------------
+    PRIMINS2,
+    _HLTHPL2,
+    PERSDOC3,
+    MEDCOST1,
+    CHECKUP1,
+
+    -- -----------------------
+    -- Mental / physical health
+    -- -----------------------
+    GENHLTH,
+    PHYSHLTH,
+    _PHYS14D,
+    MENTHLTH,
+    _MENT14D,
+
+    -- -----------------------
+    -- Other useful context
+    -- -----------------------
+    EXERANY2,
+    _TOTINDA,
+
+    -- -----------------------
+    -- Survey weighting vars
+    -- Keep even if not used yet
+    -- -----------------------
+    _PSU,
+    _STSTR,
+    _LLCPWT
+
+  FROM brfss_2024
+  "
+) |>
+  tibble::as_tibble()
+```
+

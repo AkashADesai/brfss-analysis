@@ -1,0 +1,46 @@
+library/
+local/
+cellar/
+lock/
+python/
+sandbox/
+staging/
+
+# R / RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# macOS
+.DS_Store
+
+# renv local dependencies
+renv/library/
+renv/staging/
+renv/python/
+
+# Raw / local data
+data/raw/
+data/processed/
+
+# DuckDB
+*.duckdb
+*.duckdb.wal
+.duckdb/
+
+# R Markdown / Quarto generated output
+*.nb.html
+*_cache/
+*_files/
+.quarto/
+
+# Secrets
+.Renviron
+.env
+.env.*
+
+# Temporary files
+*.tmp
+*.temp
+~*
