@@ -14,7 +14,7 @@ download_brfss <- function(year, overwrite = FALSE) {
   }
   
   # Project directories
-  raw_dir <- file.path("data", "raw", as.character(year))
+  raw_dir <- here::here("data", "raw", as.character(year))
   dir.create(raw_dir, recursive = TRUE, showWarnings = FALSE)
   
   zip_path <- file.path(

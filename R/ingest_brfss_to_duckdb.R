@@ -1,11 +1,11 @@
 ingest_brfss_to_duckdb <- function(
     year,
-    db_path = "data/brfss.duckdb",
+    db_path = here::here("data", "brfss.duckdb"),
     overwrite = FALSE
 ) {
   
   xpt_dir <- file.path(
-    "data", "raw", as.character(year), "xpt"
+    here::here("data", "raw", as.character(year)), "xpt"
   )
   
   if (!dir.exists(xpt_dir)) {

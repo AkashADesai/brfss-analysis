@@ -24,6 +24,9 @@ renv/python/
 data/raw/
 data/processed/
 
+# Raw data anywhere in project
+**/data/raw/
+
 # DuckDB
 *.duckdb
 *.duckdb.wal
