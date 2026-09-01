@@ -1,6 +1,6 @@
 # BRFSS Behavioral Health Analysis
 
-Exploratory analysis of the CDC Behavioral Risk Factor Surveillance System (BRFSS), completed as part of the Onos Health Data Scientist/Analyst exercise.
+Exploratory analysis of the CDC Behavioral Risk Factor Surveillance System (BRFSS).
 
 ## Objective
 
@@ -35,9 +35,9 @@ Raw data are not committed to this repository. The included ingestion code downl
 ├── data/
 │   ├── raw/
 │   └── processed/
+│   └── documentation/
 ├── outputs/
 │   ├── figures/
-│   └── tables/
 ├── .Rprofile
 ├── renv.lock
 ├── setup.R
@@ -46,14 +46,18 @@ Raw data are not committed to this repository. The included ingestion code downl
 ```
 
 ## Environment
+Currently this project runs/works only on local R environments.
 The project uses renv to manage R package dependencies and DuckDB for local analytical storage.
 To restore the project environment:
 ```
 renv::restore()
 ```
 
+After running once locally, you can run scripts within the project. You may or may not
+need to restart your R session after running the renv::restore() command.
+
 ## Data Setup
-Download the BRFSS source data:
+Download the BRFSS source data, tested on 2024 only but likely works with other earlier years:
 ```
 source("setup.R")
 download_brfss(2024)
@@ -63,6 +67,9 @@ Ingest the raw BRFSS data into DuckDB:
 ingest_brfss_to_duckdb(2024)
 ```
 The resulting local DuckDB database and downloaded source data are excluded from version control.
+
+## Data Reference
+BRFSS codebooks are retained as a versioned reference artifact to support reproducible recoding and data-governance checks. In a production pipeline, source documentation would be archived with raw data, and variable metadata would be modeled into tables or yamls.
 
 ## Analysis
 The analysis is developed in R, SQL/DuckDB, and the tidyverse for data exploration and visualization.

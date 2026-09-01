@@ -31,26 +31,6 @@ DBI::dbListTables(con)
 
 ### Exploratory
 ```{r}
-# Dimensions
-DBI::dbGetQuery(
-  con,
-  "
-  SELECT
-    COUNT(*) AS n_rows
-  FROM brfss_2024
-  "
-)
-
-ncol(DBI::dbListFields(con, "brfss_2024"))
-
-# Preview
-DBI::dbGetQuery(
-  con,
-  "SELECT * FROM brfss_2024 LIMIT 5"
-)
-```
-
-```{r}
 brfss <- DBI::dbGetQuery(
   con,
   "
@@ -94,10 +74,12 @@ brfss <- DBI::dbGetQuery(
     _PHYS14D,
     MENTHLTH,
     _MENT14D,
+    ADDEPEV3,
 
     -- -----------------------
-    -- Other useful context
+    -- Social / behavioral context
     -- -----------------------
+    EMTSUPRT,
     EXERANY2,
     _TOTINDA,
 
@@ -115,7 +97,897 @@ brfss <- DBI::dbGetQuery(
   tibble::as_tibble()
 
 
-# Close duckdb conn
+# Close DuckDB connection
 DBI::dbDisconnect(con, shutdown = TRUE)
+```
+
+## Light QA
+```{r}
+# First validate that only documented codes are present
+stopifnot(
+  all(na.omit(unique(brfss$`_MENT14D`)) %in% c(1, 2, 3, 9)),
+  all(na.omit(unique(brfss$MEDCOST1)) %in% c(1, 2, 7, 9)),
+  all(na.omit(unique(brfss$PERSDOC3)) %in% c(1, 2, 3, 7, 9)),
+  all(na.omit(unique(brfss$`_HLTHPL2`)) %in% c(1, 2, 9)),
+  all(na.omit(unique(brfss$CHECKUP1)) %in% c(1, 2, 3, 4, 7, 8, 9)),
+  all(na.omit(unique(brfss$ADDEPEV3)) %in% c(1, 2, 7, 9))
+)
+
+analysis_df <- brfss |>
+  dplyr::mutate(
+
+    # Mental health burden
+    mh_burden = dplyr::case_when(
+      `_MENT14D` == 1 ~ "0 days",
+      `_MENT14D` == 2 ~ "1–13 days",
+      `_MENT14D` == 3 ~ "14+ days",
+      `_MENT14D` == 9 ~ NA_character_,
+      is.na(`_MENT14D`) ~ NA_character_
+    ),
+
+    mh_burden = factor(
+      mh_burden,
+      levels = c("0 days", "1–13 days", "14+ days"),
+      ordered = TRUE
+    ),
+
+    # Needed doctor but could not afford care
+    cost_barrier = dplyr::case_when(
+      MEDCOST1 == 1 ~ TRUE,
+      MEDCOST1 == 2 ~ FALSE,
+      MEDCOST1 %in% c(7, 9) ~ NA,
+      is.na(MEDCOST1) ~ NA
+    ),
+
+    # Does not have a personal healthcare provider
+    no_provider = dplyr::case_when(
+      PERSDOC3 %in% c(1, 2) ~ FALSE,
+      PERSDOC3 == 3 ~ TRUE,
+      PERSDOC3 %in% c(7, 9) ~ NA,
+      is.na(PERSDOC3) ~ NA
+    ),
+
+    # Does not have health insurance
+    uninsured = dplyr::case_when(
+      `_HLTHPL2` == 1 ~ FALSE,
+      `_HLTHPL2` == 2 ~ TRUE,
+      `_HLTHPL2` == 9 ~ NA,
+      is.na(`_HLTHPL2`) ~ NA
+    ),
+
+    # Routine doctor checkup within the past year
+    recent_checkup = dplyr::case_when(
+      CHECKUP1 == 1 ~ TRUE,
+      CHECKUP1 %in% c(2, 3, 4, 8) ~ FALSE,
+      CHECKUP1 %in% c(7, 9) ~ NA,
+      is.na(CHECKUP1) ~ NA
+    ),
+
+    # Ever told respondent had a depressive disorder
+    prior_depression = dplyr::case_when(
+      ADDEPEV3 == 1 ~ TRUE,
+      ADDEPEV3 == 2 ~ FALSE,
+      ADDEPEV3 %in% c(7, 9) ~ NA,
+      is.na(ADDEPEV3) ~ NA
+    )
+  )
+
+```
+
+## Check Recodes - sanity check against codebook
+```{r}
+recode_checks <- list(
+
+  mental_health = analysis_df |>
+    count(`_MENT14D`, mh_burden, .drop = FALSE) |>
+    mutate(
+      pct_total = scales::percent(n / sum(n), accuracy = 0.1)
+    ),
+
+  cost_barrier = analysis_df |>
+    count(MEDCOST1, cost_barrier, .drop = FALSE) |>
+    mutate(
+      pct_total = scales::percent(n / sum(n), accuracy = 0.1)
+    ),
+
+  provider = analysis_df |>
+    count(PERSDOC3, no_provider, .drop = FALSE) |>
+    mutate(
+      pct_total = scales::percent(n / sum(n), accuracy = 0.1)
+    ),
+
+  insurance = analysis_df |>
+    count(`_HLTHPL2`, uninsured, .drop = FALSE) |>
+    mutate(
+      pct_total = scales::percent(n / sum(n), accuracy = 0.1)
+    ),
+
+  checkup = analysis_df |>
+    count(CHECKUP1, recent_checkup, .drop = FALSE) |>
+    mutate(
+      pct_total = scales::percent(n / sum(n), accuracy = 0.1)
+    ),
+
+  depression_history = analysis_df |>
+    count(ADDEPEV3, prior_depression, .drop = FALSE) |>
+    mutate(
+      pct_total = scales::percent(n / sum(n), accuracy = 0.1)
+    )
+)
+
+recode_checks
+```
+
+# Analysis
+## Access to care barriers and mental health burden
+
+```{r}
+barrier_missingness <- analysis_df |>
+  filter(!is.na(mh_burden)) |>
+  select(
+    mh_burden,
+    cost_barrier,
+    no_provider,
+    uninsured
+  ) |>
+  pivot_longer(
+    cols = c(cost_barrier, no_provider, uninsured),
+    names_to = "barrier",
+    values_to = "has_barrier"
+  ) |>
+  group_by(mh_burden, barrier) |>
+  summarise(
+    n_total = n(),
+    n_missing = sum(is.na(has_barrier)),
+    pct_missing = mean(is.na(has_barrier)),
+    .groups = "drop"
+  ) |>
+  mutate(
+    barrier = recode(
+      barrier,
+      cost_barrier = "Could not afford needed care",
+      no_provider = "No personal provider",
+      uninsured = "Uninsured"
+    )
+  )
+
+barrier_missingness |>
+  mutate(
+    pct_missing = scales::percent(pct_missing, accuracy = 0.1)
+  ) |>
+  arrange(barrier, mh_burden)
+```
+
+
+```{r}
+barrier_summary <- analysis_df |>
+  filter(!is.na(mh_burden)) |>
+  select(
+    mh_burden,
+    cost_barrier,
+    no_provider,
+    uninsured
+  ) |>
+  pivot_longer(
+    cols = c(cost_barrier, no_provider, uninsured),
+    names_to = "barrier",
+    values_to = "has_barrier"
+  ) |>
+  filter(!is.na(has_barrier)) |>
+  group_by(mh_burden, barrier) |>
+  summarise(
+    n = n(),
+    n_barrier = sum(has_barrier),
+    pct_barrier = mean(has_barrier),
+    .groups = "drop"
+  ) |>
+  mutate(
+    barrier = recode(
+      barrier,
+      cost_barrier = "Could not afford needed care",
+      no_provider = "No personal provider",
+      uninsured = "Uninsured"
+    )
+  )
+```
+
+
+```{r}
+barrier_summary |>
+  select(mh_burden, barrier, pct_barrier) |>
+  mutate(
+    pct_barrier = round(100 * pct_barrier, 1)
+  ) |>
+  pivot_wider(
+    names_from = mh_burden,
+    values_from = pct_barrier
+  ) |>
+  mutate(
+    gap_14plus_vs_0 = `14+ days` - `0 days`
+  )
+```
+
+
+```{r}
+cost_by_insurance <- analysis_df |>
+  filter(
+    !is.na(mh_burden),
+    !is.na(uninsured),
+    !is.na(cost_barrier)
+  ) |>
+  group_by(mh_burden, uninsured) |>
+  summarise(
+    n = n(),
+    n_cost_barrier = sum(cost_barrier),
+    pct_cost_barrier = mean(cost_barrier),
+    .groups = "drop"
+  ) |>
+  mutate(
+    insurance_status = if_else(
+      uninsured,
+      "Uninsured",
+      "Insured"
+    )
+  ) |>
+  select(
+    mh_burden,
+    insurance_status,
+    n,
+    n_cost_barrier,
+    pct_cost_barrier
+  )
+
+cost_by_insurance
+```
+
+```{r}
+# Define a high healthcare-connection cohort
+analysis_df <- analysis_df |>
+  mutate(
+    well_connected = case_when(
+      is.na(uninsured) |
+        is.na(no_provider) |
+        is.na(recent_checkup) ~ NA,
+
+      uninsured == FALSE &
+        no_provider == FALSE &
+        recent_checkup == TRUE ~ TRUE,
+
+      TRUE ~ FALSE
+    )
+  )
+```
+
+```{r}
+analysis_df |>
+  count(
+    uninsured,
+    no_provider,
+    recent_checkup,
+    well_connected,
+    .drop = FALSE
+  ) |>
+  mutate(
+    pct_total = scales::percent(n / sum(n), accuracy = 0.1)
+  )
+```
+
+```{r}
+mh_by_connection <- analysis_df |>
+  filter(
+    !is.na(well_connected),
+    !is.na(mh_burden)
+  ) |>
+  group_by(well_connected, mh_burden) |>
+  summarise(
+    n = n(),
+    .groups = "drop"
+  ) |>
+  group_by(well_connected) |>
+  mutate(
+    pct = n / sum(n)
+  ) |>
+  ungroup() |>
+  mutate(
+    connection_status = if_else(
+      well_connected,
+      "Well connected",
+      "Not well connected"
+    )
+  )
+
+mh_by_connection
+```
+
+## Visualize
+```{r}
+# ------------------------------------------------------------------------
+# Finding plots
+# ------------------------------------------------------------------------
+
+
+# Output directory
+plot_dir <- here::here("outputs", "figures", "2024")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Slide palette
+PURPLE      <- "#4B46FF"
+NAVY        <- "#242536"
+DARK        <- "#151829"
+LAVENDER    <- "#E8E7FF"
+LAVENDER_2  <- "#D9D8FF"
+GRAY        <- "#D7D6CF"
+BG          <- "#F7F6F2"
+
+theme_slide <- function(base_size = 14) {
+  theme_minimal(base_size = base_size, base_family = "sans") +
+    theme(
+      plot.background = element_rect(fill = BG, color = NA),
+      panel.background = element_rect(fill = BG, color = NA),
+
+      plot.title = element_text(
+        color = DARK,
+        face = "bold",
+        size = 20,
+        margin = margin(b = 6)
+      ),
+
+      plot.subtitle = element_text(
+        color = NAVY,
+        size = 12.5,
+        margin = margin(b = 16)
+      ),
+
+      plot.caption = element_text(
+        color = "#6C6D78",
+        size = 9.5,
+        hjust = 0,
+        margin = margin(t = 12)
+      ),
+
+      axis.title = element_text(
+        color = NAVY,
+        face = "bold"
+      ),
+
+      axis.text = element_text(
+        color = NAVY
+      ),
+
+      panel.grid.minor = element_blank(),
+
+      legend.title = element_blank(),
+      legend.text = element_text(color = NAVY),
+      legend.position = "top",
+
+      plot.margin = margin(18, 24, 18, 18)
+    )
+}
+```
+
+```{r}
+# ------------------------------------------------------------------------
+# Finding 1
+# Higher Mental Health Burden Associated with Barriers in Access to Care
+# ------------------------------------------------------------------------
+
+# Total respondents with valid mental-health burden
+valid_mh_n <- analysis_df |>
+  filter(!is.na(mh_burden)) |>
+  summarise(n = n()) |>
+  pull(n)
+
+# Valid denominator for each barrier
+barrier_n <- barrier_summary |>
+  group_by(barrier) |>
+  summarise(
+    valid_n = sum(n),
+    .groups = "drop"
+  )
+
+# Plotting data
+barrier_plot_df <- barrier_summary |>
+  left_join(
+    barrier_n,
+    by = "barrier"
+  ) |>
+  mutate(
+    # Reverse factor order so plot reads low -> high burden from top to bottom
+    mh_burden = factor(
+      mh_burden,
+      levels = c("14+ days", "1–13 days", "0 days"),
+      ordered = TRUE
+    ),
+
+    barrier = factor(
+      barrier,
+      levels = c(
+        "Could not afford needed care",
+        "No personal provider",
+        "Uninsured"
+      )
+    ),
+
+    pct_label = scales::percent(
+      pct_barrier,
+      accuracy = 0.1
+    ),
+
+    label_color = if_else(
+      pct_barrier >= 0.17,
+      "white",
+      NAVY
+    )
+  )
+
+# Barrier labels with valid denominator
+barrier_labels <- barrier_n |>
+  mutate(
+    barrier = factor(
+      barrier,
+      levels = c(
+        "Could not afford needed care",
+        "No personal provider",
+        "Uninsured"
+      )
+    ),
+
+    axis_label = paste0(
+      barrier,
+      "\n",
+      "n = ",
+      scales::comma(valid_n)
+    )
+  ) |>
+  arrange(barrier)
+
+barrier_label_values <- setNames(
+  barrier_labels$axis_label,
+  as.character(barrier_labels$barrier)
+)
+
+# Plot
+p1 <- ggplot(
+  barrier_plot_df,
+  aes(
+    x = barrier,
+    y = mh_burden,
+    fill = pct_barrier
+  )
+) +
+  geom_tile(
+    width = 0.94,
+    height = 0.84,
+    color = BG,
+    linewidth = 2.5
+  ) +
+
+  geom_text(
+    aes(
+      label = pct_label,
+      color = label_color
+    ),
+    size = 6,
+    fontface = "bold"
+  ) +
+
+  scale_color_identity() +
+
+  scale_fill_gradient(
+    low = LAVENDER,
+    high = PURPLE,
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+
+  scale_x_discrete(
+    labels = barrier_label_values,
+    position = "top"
+  ) +
+
+  labs(
+    title = "Mental Health Burden and Barriers in Access to Care",
+
+    subtitle = paste0(
+      "Cost-related unmet need shows the steepest gradient",
+      "\n",
+      "Mental-health burden available for N = ",
+      scales::comma(valid_mh_n),
+      " respondents"
+    ),
+
+    x = NULL,
+    y = "Poor mental-health days in past 30 days",
+
+    caption = paste0(
+      "Source: CDC BRFSS 2024. Unweighted respondent estimates. ",""
+    )
+  ) +
+
+  theme_slide() +
+
+  theme(
+    plot.title = element_text(
+      color = DARK,
+      face = "bold",
+      size = 22,
+      lineheight = 1.05,
+      margin = margin(b = 8)
+    ),
+
+    panel.grid = element_blank(),
+
+    axis.text.x.top = element_text(
+      face = "bold",
+      size = 10.5,
+      lineheight = 1.05,
+      margin = margin(b = 8)
+    ),
+
+    axis.text.y = element_text(
+      face = "bold",
+      size = 12
+    ),
+
+    axis.title.y = element_text(
+      margin = margin(r = 12)
+    ),
+
+    axis.ticks.x = element_blank(),
+
+    legend.position = "none"
+  )
+
+# Save
+ggsave(
+  filename = file.path(
+    plot_dir,
+    "01_mh_burden_access_barriers.png"
+  ),
+  plot = p1,
+  width = 10,
+  height = 5.625,
+  dpi = 300,
+  bg = BG
+)
+
+p1
+```
+
+```{r}
+# ------------------------------------------------------------------------
+# Finding 2
+# Insurance, mental-health burden, and cost barriers
+# ------------------------------------------------------------------------
+
+# Total valid denominator by insurance status
+insurance_n <- cost_by_insurance |>
+  group_by(insurance_status) |>
+  summarise(
+    valid_n = sum(n),
+    .groups = "drop"
+  )
+
+# Create legend labels with denominator
+insurance_labels <- insurance_n |>
+  mutate(
+    legend_label = paste0(
+      insurance_status,
+      " (n = ",
+      scales::comma(valid_n),
+      ")"
+    )
+  )
+
+insurance_label_values <- setNames(
+  insurance_labels$legend_label,
+  insurance_labels$insurance_status
+)
+
+# Plotting data
+cost_plot_df <- cost_by_insurance |>
+  mutate(
+    mh_burden = factor(
+      mh_burden,
+      levels = c("0 days", "1–13 days", "14+ days"),
+      ordered = TRUE
+    ),
+
+    insurance_status = factor(
+      insurance_status,
+      levels = c("Insured", "Uninsured")
+    ),
+
+    pct_label = scales::percent(
+      pct_cost_barrier,
+      accuracy = 0.1
+    )
+  )
+
+# Plot
+p2 <- ggplot(
+  cost_plot_df,
+  aes(
+    x = mh_burden,
+    y = pct_cost_barrier,
+    fill = insurance_status
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.72),
+    width = 0.62
+  ) +
+
+  geom_text(
+    aes(label = pct_label),
+    position = position_dodge(width = 0.72),
+    vjust = -0.45,
+    color = NAVY,
+    size = 5,
+    fontface = "bold"
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Insured" = PURPLE,
+      "Uninsured" = NAVY
+    ),
+    labels = insurance_label_values
+  ) +
+
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 0.76),
+    breaks = seq(0, 0.7, 0.1),
+    expand = expansion(mult = c(0, 0))
+  ) +
+
+  labs(
+    title = "Insurance, Mental Health Burden, and Cost Barriers",
+
+    subtitle = paste0(
+      "Insurance reduces the cost barrier, but ",
+      "higher mental health burden is still associated \nwith higher likelihood of not being able to afford care"
+    ),
+
+    x = "Poor mental-health days in past 30 days",
+    y = "Could not afford needed care",
+
+    caption = paste0(
+      "Analysis includes respondents with valid mental-health burden, ",
+      "insurance status, and cost-barrier responses."
+    )
+  ) +
+
+  theme_slide() +
+
+  theme(
+    plot.title = element_text(
+      color = DARK,
+      face = "bold",
+      size = 22,
+      lineheight = 1.05,
+      margin = margin(b = 8)
+    ),
+
+    panel.grid.major.x = element_blank(),
+
+    panel.grid.major.y = element_line(
+      color = GRAY,
+      linewidth = 0.4
+    ),
+
+    axis.text.x = element_text(
+      face = "bold",
+      size = 11.5
+    ),
+
+    axis.text.y = element_text(
+      size = 10.5
+    ),
+
+    axis.title.x = element_text(
+      margin = margin(t = 10)
+    ),
+
+    axis.title.y = element_text(
+      margin = margin(r = 10)
+    ),
+
+    legend.position = "top",
+    legend.justification = "left"
+  )
+
+# Save
+ggsave(
+  filename = file.path(
+    plot_dir,
+    "02_cost_barrier_by_insurance.png"
+  ),
+  plot = p2,
+  width = 10,
+  height = 5.625,
+  dpi = 300,
+  bg = BG
+)
+
+p2
+```
+
+```{r}
+# ------------------------------------------------------------------------
+# Finding 3
+# Mental-health burden among people connected to care
+# ------------------------------------------------------------------------
+
+# Total valid denominator by connection status
+connection_totals <- mh_by_connection |>
+  group_by(connection_status) |>
+  summarise(
+    n_total = sum(n),
+    .groups = "drop"
+  )
+
+# Plotting data
+connection_plot_df <- mh_by_connection |>
+  mutate(
+    connection_status = factor(
+      connection_status,
+      levels = c(
+        "Not well connected",
+        "Well connected"
+      )
+    ),
+
+    mh_burden = factor(
+      mh_burden,
+      levels = c(
+        "0 days",
+        "1–13 days",
+        "14+ days"
+      ),
+      ordered = TRUE
+    ),
+
+    pct_label = scales::percent(
+      pct,
+      accuracy = 0.1
+    ),
+
+    label_color = dplyr::case_when(
+      mh_burden == "14+ days" ~ "white",
+      TRUE ~ NAVY
+    )
+  )
+
+# Add total n to group labels
+connection_labels <- connection_totals |>
+  mutate(
+    axis_label = paste0(
+      connection_status,
+      "\n",
+      "n = ",
+      scales::comma(n_total)
+    )
+  )
+
+connection_label_values <- setNames(
+  connection_labels$axis_label,
+  connection_labels$connection_status
+)
+
+# Plot
+p3 <- ggplot(
+  connection_plot_df,
+  aes(
+    x = connection_status,
+    y = pct,
+    fill = mh_burden
+  )
+) +
+  geom_col(
+    width = 0.58
+  ) +
+
+  geom_text(
+    aes(
+      label = pct_label,
+      color = label_color
+    ),
+    position = position_stack(vjust = 0.5),
+    size = 5,
+    fontface = "bold"
+  ) +
+
+  scale_color_identity() +
+
+  scale_fill_manual(
+    values = c(
+      "0 days" = GRAY,
+      "1–13 days" = LAVENDER_2,
+      "14+ days" = PURPLE
+    )
+  ) +
+
+  scale_x_discrete(
+    labels = connection_label_values
+  ) +
+
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0))
+  ) +
+
+  coord_flip() +
+
+  labs(
+    title = "Mental Health Burden Among People Connected to Care",
+
+    subtitle = paste0(
+      "Even among respondents who are insured, have a personal provider, ",
+      "and had a routine checkup \nin the past year, ~1 in 8 report ",
+      "14+ poor mental-health days."
+    ),
+
+    x = NULL,
+    y = "Share of respondents",
+
+    caption = paste0(
+      "'Well connected' = insured + personal provider + ",
+      "routine checkup within the past year."
+    )
+  ) +
+
+  theme_slide() +
+
+  theme(
+    plot.title = element_text(
+      color = DARK,
+      face = "bold",
+      size = 22,
+      lineheight = 1.05,
+      margin = margin(b = 8)
+    ),
+
+    panel.grid.major.y = element_blank(),
+
+    panel.grid.major.x = element_line(
+      color = GRAY,
+      linewidth = 0.4
+    ),
+
+    axis.text.y = element_text(
+      face = "bold",
+      size = 11.5,
+      lineheight = 1.05
+    ),
+
+    axis.text.x = element_text(
+      size = 10.5
+    ),
+
+    axis.title.x = element_text(
+      margin = margin(t = 10)
+    ),
+
+    legend.position = "top",
+    legend.justification = "left"
+  )
+
+# Save
+ggsave(
+  filename = file.path(
+    plot_dir,
+    "03_mh_burden_by_healthcare_connection.png"
+  ),
+  plot = p3,
+  width = 10,
+  height = 5.625,
+  dpi = 300,
+  bg = BG
+)
+
+p3
 ```
 

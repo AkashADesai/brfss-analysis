@@ -47,3 +47,4 @@ data/processed/
 *.tmp
 *.temp
 ~*
+.posit/assistant
